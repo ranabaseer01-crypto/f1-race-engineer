@@ -1,3 +1,5 @@
+import csv
+import os
 import socket
 import threading
 import queue
@@ -10,6 +12,21 @@ from f1_2020_telemetry.packets import unpack_udp_packet
 COMPOUNDS = {16: "Soft", 17: "Medium", 18: "Hard", 7: "Intermediate", 8: "Wet", 
              9: "Wet", 10: "Wet", 11: "Super Soft", 12: "Ultra Soft", 13: "Hyper Soft"}
 WEATHER = {0: "Clear", 1: "Light Cloud", 2: "Overcast", 3: "Light Rain", 4: "Heavy Rain", 5: "Storm"}
+
+class DataManager:
+    def __init__(self, filename="race_history.csv"):
+        self.filename = filename
+        self.headers = ["Timestamp", "Lap", "S1", "S2", "S3", "Total", "Wear", "Fuel"]
+        # If the file doesn't exist, create it with headers
+        if not os.path.exists(self.filename):
+            with open(self.filename, 'w', newline='') as f:
+                csv.writer(f).writerow(self.headers)
+
+    def save_lap(self, data_dict):
+        """Appends a single lap to the local CSV file."""
+        with open(self.filename, 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=self.headers)
+            writer.writerow(data_dict)
 
 class LogicEngineer:
     def __init__(self):
@@ -37,6 +54,7 @@ class LogicEngineer:
 
         # Start Telemetry & Sequence in background
         threading.Thread(target=self.run_startup_sequence, daemon=True).start()
+        self.data_manager = DataManager()
 
     def _tts_worker(self):
         """Processes speech requests by creating fresh instances to avoid buffer hangs."""
@@ -199,16 +217,39 @@ class LogicEngineer:
                                     self.state['s2_time'] = s2
                             self.state['sector'] = my_lap.sector
 
-                        if my_lap.currentLapNum > self.state['lap'] and self.state['lap'] > 0:
-                            last_lap = my_lap.lastLapTime
-                            self.state['last_lap'] = last_lap
-                            s3 = last_lap - (self.state['s1_time'] + self.state['s2_time'])
-                            if s3 > 0 and s3 < self.state['best_s3']: self.state['best_s3'] = s3
+                            if my_lap.currentLapNum > self.state['lap'] and self.state['lap'] > 0:
+                                last_lap = my_lap.lastLapTime
+                                self.state['last_lap'] = last_lap
+                                
+                                # Calculate Sector 3
+                                s3 = last_lap - (self.state['s1_time'] + self.state['s2_time'])
+                                
+                                # Prepare the data packet for the CSV
+                                lap_payload = {
+                                    "Timestamp": time.strftime("%H:%M:%S"),
+                                    "Lap": self.state['lap'],
+                                    "S1": f"{self.state['s1_time']:.3f}",
+                                    "S2": f"{self.state['s2_time']:.3f}",
+                                    "S3": f"{s3:.3f}",
+                                    "Total": f"{last_lap:.3f}",
+                                    "Wear": f"{sum(self.state['wear'])/4:.1f}",
+                                    "Fuel": f"{self.state['fuel_laps']:.2f}"
+                                }
+                                
+                                # SAVE IT TO DISK
+                                self.data_manager.save_lap(lap_payload)
+                                
+                                # Notify the driver
+                                if self.state['overall_best_lap'] < 999.0:
+                                    gap = last_lap - self.state['overall_best_lap']
+                                    self.speak(f"Lap complete. Time {last_lap:.3f}. Data logged.")
+                                
+                                self.state['lap'] = my_lap.currentLapNum
 
-                            if self.state['overall_best_lap'] < 999.0:
-                                gap = last_lap - self.state['overall_best_lap']
-                                self.speak(f"Lap complete. Time {last_lap:.3f}. Gap to fastest is {gap:.3f}")
-                            self.state['lap'] = my_lap.currentLapNum
+                                if self.state['overall_best_lap'] < 999.0:
+                                    gap = last_lap - self.state['overall_best_lap']
+                                    self.speak(f"Lap complete. Time {last_lap:.3f}. Gap to fastest is {gap:.3f}")
+                                self.state['lap'] = my_lap.currentLapNum
 
                     elif p_id == 7: # Status
                         p = packet.carStatusData[idx]
